@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="logo.svg" alt="Helm.Warning" width="420"/>
+
+</div>
+
 # Helm.Warning.Backend — NAVAREA Maritime Safety Information Pipeline
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
