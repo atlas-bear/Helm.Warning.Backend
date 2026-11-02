@@ -50,6 +50,8 @@ from scripts.navarea_ix_scraper import (
     _candidate_doc_urls,
     _dtg_is_recent,
     _filter_stored_rows,
+    _known_ix_keys_from_file,
+    _resolve_stored_keys,
     _stored_ix_keys,
     assemble_bulletin,
     extract_rows,
@@ -450,6 +452,64 @@ class TestSkipStoredRows(unittest.TestCase):
         to_fetch, skipped = _filter_stored_rows(rows, None)
         self.assertEqual(len(to_fetch), len(rows))
         self.assertEqual(skipped, 0)
+
+
+class TestKnownIdsFile(unittest.TestCase):
+    """IX_KNOWN_IDS_FILE supplies the stored set without database access,
+    so a credential-less run (e.g. writing to HELM_SYNC_SINK) still skips
+    stored documents instead of re-fetching the same first rows into the
+    WAF's request cap every run."""
+
+    def _write(self, text):
+        f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                        encoding="utf-8")
+        f.write(text)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_file_lines_parse_like_stored_canonical_ids(self):
+        path = self._write("# known ids\nNAVAREA IX 412/26\n\n"
+                           "  NAVAREA IX 376/23  \ngarbage\nNAVAREA II 001/26\n")
+        self.assertEqual(_known_ix_keys_from_file(path),
+                         {(412, "26"), (376, "23")})
+
+    def test_empty_file_is_known_and_empty(self):
+        self.assertEqual(_known_ix_keys_from_file(self._write("")), set())
+
+    def test_unreadable_file_fails_open(self):
+        self.assertIsNone(_known_ix_keys_from_file(
+            os.path.join(tempfile.gettempdir(), "no-such-ix-known-ids.txt")))
+
+    def test_file_skips_stored_rows_like_the_database(self):
+        path = self._write("NAVAREA IX 412/26\nNAVAREA IX 410/26\n")
+        rows = extract_rows(_MINI_HTML)
+        to_fetch, skipped = _filter_stored_rows(
+            rows, _known_ix_keys_from_file(path),
+            today=TestSkipStoredRows._FAR_FUTURE)
+        self.assertEqual([r[0] for r in to_fetch], ["394", "378"])
+        self.assertEqual(skipped, 2)
+
+    def test_file_takes_precedence_over_the_database(self):
+        path = self._write("NAVAREA IX 412/26\n")
+        env = {"IX_KNOWN_IDS_FILE": path, "IX_FULL_SNAPSHOT": ""}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(navarea_ix_scraper, "_supabase_client_or_none",
+                               side_effect=AssertionError("database queried")):
+            self.assertEqual(_resolve_stored_keys(), {(412, "26")})
+
+    def test_full_snapshot_overrides_the_file(self):
+        path = self._write("NAVAREA IX 412/26\n")
+        env = {"IX_KNOWN_IDS_FILE": path, "IX_FULL_SNAPSHOT": "1"}
+        with mock.patch.dict(os.environ, env):
+            self.assertIsNone(_resolve_stored_keys())
+
+    def test_without_the_file_the_database_lookup_is_used(self):
+        client = _FakeStoredStateClient(["NAVAREA IX 394/26"])
+        with mock.patch.dict(os.environ, {"IX_KNOWN_IDS_FILE": "", "IX_FULL_SNAPSHOT": ""}), \
+             mock.patch.object(navarea_ix_scraper, "_supabase_client_or_none",
+                               return_value=client):
+            self.assertEqual(_resolve_stored_keys(), {(394, "26")})
 
 
 class TestDocPause(unittest.TestCase):

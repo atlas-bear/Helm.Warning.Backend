@@ -54,6 +54,12 @@ Strategy (fail-closed, mirrors scripts/navarea_vii_scraper.py):
      stays disabled (full_snapshot=False), so warnings skipped because
      they are stored can never be auto-cancelled. IX_FULL_SNAPSHOT=1
      forces a full fetch (backfill / lifecycle sweep).
+     IX_KNOWN_IDS_FILE=<path> supplies the stored set from a file
+     instead of the database (one canonical id per line, e.g.
+     'NAVAREA IX 424/26'; blank lines and '#' comments ignored), for
+     runs without database access that still need to stay inside the
+     WAF's patience. A configured but unreadable file fails OPEN, like
+     an unreachable database.
   1. Fetch the page (Scrapling Fetcher — stealthy headers, retries;
      requests fallback); any error -> non-zero exit, harvest untouched,
      parse and sync NEVER run (never sync a partial snapshot).
@@ -506,6 +512,52 @@ def _stored_ix_keys(client) -> Optional[set]:
     return keys
 
 
+def _known_ix_keys_from_file(path: str) -> Optional[set]:
+    """(number, yy) pairs listed in an IX_KNOWN_IDS_FILE.
+
+    Same shape as _stored_ix_keys, read from a file instead of the
+    database: one canonical id per line ('NAVAREA IX 424/26'), blank
+    lines and '#' comments ignored, unrecognised lines counted and
+    skipped. None = the file cannot be read => the caller fetches
+    everything (fail-open, as for an unreachable database).
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        print(f"WARNING: IX_KNOWN_IDS_FILE unreadable ({e}); fetching "
+              f"every row.")
+        return None
+    keys = set()
+    unrecognised = 0
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        m = _STORED_KEY_RE.match(text)
+        if m:
+            keys.add((int(m.group(1)), m.group(2)))
+        else:
+            unrecognised += 1
+    print(f"NOTE: IX_KNOWN_IDS_FILE lists {len(keys)} known warning(s)"
+          + (f"; {unrecognised} unrecognised line(s) ignored" if unrecognised else "")
+          + ".")
+    return keys
+
+
+def _resolve_stored_keys() -> Optional[set]:
+    """The stored set for this run (strategy point 0), in precedence order:
+    IX_FULL_SNAPSHOT=1 -> None (fetch every row); IX_KNOWN_IDS_FILE -> the
+    file; otherwise the database lookup (None without credentials)."""
+    if os.environ.get("IX_FULL_SNAPSHOT", "").lower() in ("1", "true", "yes"):
+        print("NOTE: IX_FULL_SNAPSHOT=1 - fetching every row (backfill).")
+        return None
+    known_ids_file = os.environ.get("IX_KNOWN_IDS_FILE", "").strip()
+    if known_ids_file:
+        return _known_ix_keys_from_file(known_ids_file)
+    return _stored_ix_keys(_supabase_client_or_none())
+
+
 def _filter_stored_rows(rows: List[Tuple[str, str, Optional[str], str]],
                         stored_keys: Optional[set],
                         today: Optional[date] = None
@@ -793,11 +845,7 @@ def main() -> bool:
     # steady-state harvest fetches only new / recent / unparseable-DTG
     # rows, which keeps the run inside the WAF's patience.
     full_snapshot = True
-    if os.environ.get("IX_FULL_SNAPSHOT", "").lower() in ("1", "true", "yes"):
-        print("NOTE: IX_FULL_SNAPSHOT=1 - fetching every row (backfill).")
-        stored_keys = None
-    else:
-        stored_keys = _stored_ix_keys(_supabase_client_or_none())
+    stored_keys = _resolve_stored_keys()
     rows_to_fetch, stored_skipped = _filter_stored_rows(rows, stored_keys)
     if stored_skipped:
         full_snapshot = False
