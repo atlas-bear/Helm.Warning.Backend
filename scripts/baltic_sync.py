@@ -19,6 +19,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 from shared.sync_engine import run_differential_sync
+from shared.sync_sink import configured_sink_path
 
 SOURCE_ID = "sma-baltic-subarea"
 
@@ -52,7 +53,8 @@ def sync_to_supabase(json_file="navareas/baltic/parsed_baltic_warnings.json") ->
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY")
 
-    if not url or not key:
+    # A configured file sink (HELM_SYNC_SINK) needs no credentials.
+    if (not url or not key) and configured_sink_path() is None:
         print("ℹ️ SUPABASE_URL or SUPABASE_KEY missing; skipping Baltic sync in dry-run mode.")
         return True
 

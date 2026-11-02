@@ -185,6 +185,29 @@ class TestDifferentialSyncSink(unittest.TestCase):
         self.assertFalse(rec["full_snapshot"])
         self.assertEqual(rec["cancel_targets"].get("NAVAREA VIII 90/26"), "NAVAREA VIII 101/26")
 
+    def test_credential_gated_sync_modules_reach_the_sink(self):
+        # navarea_generic_sync (IX, III, VII, X, XIX, ...) and baltic_sync
+        # check credentials themselves before the engine; under the sink
+        # they must still emit, not report a dry run.
+        from scripts import navarea_generic_sync, baltic_sync
+        generic = os.path.join(self._tmp.name, "parsed.json")
+        with open(generic, "w", encoding="utf-8") as f:
+            json.dump({"raw_messages": [], "nav_warnings": [_warning(424)],
+                       "memo": {"source_id": "manual-navarea-ix", "navarea": "IX"}}, f)
+        baltic = os.path.join(self._tmp.name, "parsed_baltic.json")
+        with open(baltic, "w", encoding="utf-8") as f:
+            json.dump({"raw_messages": [], "nav_warnings": [
+                _warning(7, navarea="BALTIC", warning_id="7/26")]}, f)
+        no_creds = {"SUPABASE_URL": "", "SUPABASE_KEY": "", "ALLOW_DRY_RUN": ""}
+        with mock.patch.dict(os.environ, no_creds):
+            self.assertTrue(navarea_generic_sync.sync_to_supabase(generic, full_snapshot=False))
+            self.assertTrue(baltic_sync.sync_to_supabase(baltic))
+        records = _read_records(self.path)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["navarea"], "NAVAREA IX")
+        self.assertFalse(records[0]["full_snapshot"])
+        self.assertEqual(len(records[1]["warnings"]), 1)
+
     def test_empty_feed_still_writes_a_record_and_runs_append(self):
         run_differential_sync("manual-navarea-ix", "NAVAREA IX", [], [])
         run_differential_sync("manual-navarea-ix", "NAVAREA IX", [_warning(424)], [])
