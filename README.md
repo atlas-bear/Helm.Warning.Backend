@@ -388,6 +388,7 @@ All settings are managed centrally via [`shared/config.py`](shared/config.py) an
 | `SUPABASE_URL` | Yes (in Prod) | `""` | Prod / CI | Supabase project URL (must begin with `https://` or `http://`). |
 | `SUPABASE_KEY` | Yes (in Prod) | `""` | Prod / CI | Supabase Service Role or API Key (minimum 20 characters). |
 | `ALLOW_DRY_RUN` | No | `""` | Local / CI | Set to `1` or `true` to allow pipelines to harvest and parse without live database credentials. |
+| `HELM_SYNC_SINK` | No | *(off)* | All | `jsonl:<path>` writes each sync run as one JSON line to `<path>` (normalised warnings, geometries, `full_snapshot`, resolved CANCEL targets) instead of writing to Supabase; no database client is opened. Record contract in [`shared/sync_sink.py`](shared/sync_sink.py). |
 | `SYNC_CANCEL_MIN_FEED_COUNT` | No | `10` | All | Minimum number of scraped warnings required before absence can be treated as cancellation. |
 | `SYNC_CANCEL_MIN_FEED_FRACTION` | No | `0.5` | All | Minimum fraction (e.g. 50%) of active DB records that a scrape must cover to be considered a credible snapshot. |
 | `SYNC_APPLY_CANCEL_REFS` | No | *(off)* | All | Set to `1` to let the sync resolve CANCEL cross-references into evidence-based `cancelled` transitions. Without it the pass only resolves and logs (audit-only). Never deletes; always a guarded status transition. |

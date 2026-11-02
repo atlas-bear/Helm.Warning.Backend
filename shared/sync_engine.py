@@ -24,6 +24,7 @@ if ROOT_DIR not in sys.path:
 
 from shared.models import build_master_payload, build_geometry_payloads, parse_safe_iso_timestamp
 from shared.utils import compute_differential
+from shared.sync_sink import configured_sink_path, build_run_record, write_run_record
 
 VALID_RAW_COLUMNS = {
     "warning_id", "source_id", "subject_header",
@@ -51,6 +52,14 @@ def get_supabase_client():
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY")
     allow_dry_run = os.environ.get("ALLOW_DRY_RUN", "").lower() in ("1", "true", "yes")
+
+    # A configured file sink means no database for the whole process: every
+    # caller (stored-row lookups, the sync, post-sync supersede passes) gets
+    # None, exactly as in dry-run mode, so a credential-less run never exits
+    # on a lookup that only exists to serve the database path.
+    if configured_sink_path() is not None:
+        print("ℹ️ HELM_SYNC_SINK active: no Supabase client (output goes to the sink file).")
+        return None
 
     # Explicit dry-run request always wins, even with valid credentials present,
     # so CI can validate the full pipeline without touching the database.
@@ -330,6 +339,59 @@ def resolve_cancel_cross_refs(supabase_client, scraped_warnings, navarea_name,
     return counts
 
 
+def _normalize_scraped_warning(
+    source_id: str,
+    navarea_name: str,
+    raw_warn: Dict[str, Any],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], str]:
+    """(master, geometries, warning_id) for one scraped warning.
+
+    The single normalisation both the Supabase path and the file sink
+    use, so a sink record holds exactly what the database would receive.
+    """
+    raw_warn_copy = dict(raw_warn)
+    if "source_id" not in raw_warn_copy or not raw_warn_copy["source_id"]:
+        raw_warn_copy["source_id"] = source_id
+    if "navarea" not in raw_warn_copy or not raw_warn_copy["navarea"]:
+        raw_warn_copy["navarea"] = navarea_name
+
+    master = build_master_payload(raw_warn_copy)
+    geoms = build_geometry_payloads(raw_warn_copy)
+    return master, geoms, raw_warn_copy.get("warning_id", master["canonical_id"])
+
+
+def _emit_to_sink(
+    sink_path: str,
+    source_id: str,
+    navarea_name: str,
+    scraped_warnings: List[Dict[str, Any]],
+    full_snapshot: bool,
+) -> bool:
+    """HELM_SYNC_SINK path: one record per run, no database client."""
+    entries = []
+    for raw_warn in scraped_warnings or []:
+        master, geoms, wid = _normalize_scraped_warning(source_id, navarea_name, raw_warn)
+        entries.append({
+            "warning_id": wid,
+            "master": master,
+            "geometries": geoms,
+            "cross_refs": raw_warn.get("cross_refs") or [],
+        })
+    scraped_ids = {e["master"]["canonical_id"] for e in entries}
+    # Carriers are keyed by canonical_id so a target maps to a full id
+    # ("NAVAREA IX 430/26"), not a bare warning number.
+    cancel_targets = _cancel_ref_target_ids(
+        [{"canonical_id": e["master"]["canonical_id"], "cross_refs": e["cross_refs"]}
+         for e in entries],
+        navarea_name, scraped_ids)
+    record = build_run_record(source_id, navarea_name, entries, full_snapshot, cancel_targets)
+    write_run_record(sink_path, record)
+    print(f"📝 Sync sink: {len(entries)} warning(s), {len(cancel_targets)} cancel "
+          f"target(s) for {navarea_name} -> {sink_path} "
+          f"(full_snapshot={full_snapshot}); no database client opened.")
+    return True
+
+
 def run_differential_sync(
     source_id: str,
     navarea_name: str,
@@ -345,11 +407,20 @@ def run_differential_sync(
     that skipped already-stored rows): the evidence-based cancel pass is
     disabled and scrape-absent warnings stay 'unobserved' (retained
     active) — absence is a skipping decision, not withdrawal evidence.
+
+    With HELM_SYNC_SINK set (see shared/sync_sink.py) the run is written
+    to the sink file instead and no database client is opened, even when
+    one is passed in.
     """
     started_at = datetime.now(timezone.utc).isoformat()
     print("=" * 65)
     print(f"⚡ {navarea_name} Differential Sync Engine ({source_id})")
     print("=" * 65)
+
+    sink_path = configured_sink_path()
+    if sink_path is not None:
+        return _emit_to_sink(sink_path, source_id, navarea_name,
+                             scraped_warnings, full_snapshot)
 
     if supabase_client is None:
         supabase_client = get_supabase_client()
@@ -373,20 +444,13 @@ def run_differential_sync(
     scraped_for_diff: List[Dict[str, Any]] = []
 
     for raw_warn in scraped_warnings:
-        raw_warn_copy = dict(raw_warn)
-        if "source_id" not in raw_warn_copy or not raw_warn_copy["source_id"]:
-            raw_warn_copy["source_id"] = source_id
-        if "navarea" not in raw_warn_copy or not raw_warn_copy["navarea"]:
-            raw_warn_copy["navarea"] = navarea_name
-
-        master = build_master_payload(raw_warn_copy)
-        geoms = build_geometry_payloads(raw_warn_copy)
+        master, geoms, wid = _normalize_scraped_warning(source_id, navarea_name, raw_warn)
         cid = master["canonical_id"]
 
-        normalized_items.append((master, geoms, raw_warn_copy.get("warning_id", cid)))
+        normalized_items.append((master, geoms, wid))
         scraped_for_diff.append({
             "canonical_id": cid,
-            "warning_id": raw_warn_copy.get("warning_id", cid),
+            "warning_id": wid,
             "status": master["status"],
             "raw_text": master["raw_text"],
             "_master": master,

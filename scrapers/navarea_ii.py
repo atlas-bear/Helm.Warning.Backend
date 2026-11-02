@@ -50,6 +50,7 @@ except ImportError:
 
 from shared.models import build_master_payload, build_geometry_payloads, parse_safe_iso_timestamp
 from shared.sync_engine import upsert_warning_atomic
+from shared.sync_sink import configured_sink_path, build_run_record, write_run_record
 
 try:
     from shared.utils import classify_hazard, classify_hazard_categories
@@ -455,6 +456,17 @@ def run_navarea_ii_pipeline(
         "dry_run": dry_run or (supabase is None),
     }
 
+    # File sink (HELM_SYNC_SINK, see shared/sync_sink.py): every adapted
+    # warning is collected and written as ONE run record at the end
+    # instead of being upserted per warning. The public exchange set is
+    # the whole NAVAREA II series in force, so a run that decoded every
+    # dataset is a complete snapshot; any skipped dataset makes it partial.
+    sink_path = configured_sink_path()
+    sink_entries: List[Dict[str, Any]] = []
+    incomplete_items = 0
+    if sink_path is not None:
+        summary["sink"] = sink_path
+
     payloads: List[Dict[str, Any]] = []
     if mock_payload is not None:
         payloads = [mock_payload]
@@ -517,18 +529,21 @@ def run_navarea_ii_pipeline(
     for item in warning_objects:
         raw_b64 = item.get("data")
         if not raw_b64:
+            incomplete_items += 1
             continue
 
         try:
             zip_bytes = base64.b64decode(raw_b64)
         except Exception as e:
             print(f"  ⚠️ Base64 decode failed: {e}")
+            incomplete_items += 1
             continue
 
         try:
             archive = zipfile.ZipFile(io.BytesIO(zip_bytes))
         except Exception as e:
             print(f"  ⚠️ Corrupt ZIP archive: {e}")
+            incomplete_items += 1
             continue
 
         with archive:
@@ -541,6 +556,7 @@ def run_navarea_ii_pipeline(
                     raw_gml = archive.read(file_path).decode("utf-8", errors="replace")
                 except Exception as e:
                     print(f"  ⚠️ Could not read GML file {file_path}: {e}")
+                    incomplete_items += 1
                     continue
 
                 # 1. Rule-first local extraction (no AI fallback)
@@ -569,8 +585,17 @@ def run_navarea_ii_pipeline(
                 geoms = adapted_warn["_geoms"]
 
 
-                # 4. Upsert to Supabase
-                if supabase and not dry_run:
+                # 4. Upsert to Supabase (or collect for the file sink)
+                if sink_path is not None:
+                    sink_entries.append({
+                        "warning_id": warning_no or master["canonical_id"],
+                        "master": master,
+                        "geometries": geoms,
+                        "cross_refs": [],
+                    })
+                    summary["synced"] += 1
+                    print(f"  📝 [SINK] Processed {master['canonical_id']} (Triage: {master['triage_tier']}, Geoms: {len(geoms)})")
+                elif supabase and not dry_run:
                     try:
                         checksum = hashlib.sha256(raw_gml.encode("utf-8")).hexdigest()
                         supabase.table("raw_messages").insert({
@@ -595,6 +620,14 @@ def run_navarea_ii_pipeline(
                     summary["synced"] += 1
                     status_note = "[DRY-RUN]" if dry_run else "[NO-DB]"
                     print(f"  🔍 {status_note} Processed {master['canonical_id']} (Triage: {master['triage_tier']}, Geoms: {len(geoms)})")
+
+    if sink_path is not None:
+        full_snapshot = incomplete_items == 0
+        write_run_record(sink_path, build_run_record(
+            SOURCE_ID, "NAVAREA II", sink_entries, full_snapshot))
+        print(f"📝 Sync sink: {len(sink_entries)} warning(s) for NAVAREA II -> "
+              f"{sink_path} (full_snapshot={full_snapshot}, "
+              f"{incomplete_items} dataset(s) skipped); no database client used.")
 
 
     print("\n" + "=" * 70)
