@@ -89,6 +89,53 @@ class TestViiiSalvage(unittest.TestCase):
                     navarea_8_scraper.scrape_viii_warnings(raw)
 
 
+class TestViiiMirrorToggle(unittest.TestCase):
+    """VIII_DISABLE_MIRROR=1 removes Tier 3: acquisition succeeds from the
+    coordinator's own publication or fails/salvages without the mirror."""
+
+    def _run(self, env, partial=None, t1=None, t2=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = os.path.join(tmp, "navarea_8_warnings.txt")
+            if partial is not None:
+                with open(raw, "w", encoding="utf-8") as f:
+                    f.write(partial)
+            boom = RuntimeError("tier down")
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(navarea_8_scraper, "_fetch_tier1_table",
+                                   side_effect=t1 or boom), \
+                 mock.patch.object(navarea_8_scraper, "_fetch_tier2_pdf",
+                                   side_effect=t2 or boom), \
+                 mock.patch.object(navarea_8_scraper, "_fetch_tier3_mirror",
+                                   return_value=(_bulletin(8), "completed")) as t3:
+                try:
+                    return navarea_8_scraper.scrape_viii_warnings(raw), t3
+                except RuntimeError as e:
+                    return e, t3
+
+    def test_disabled_mirror_is_never_fetched(self):
+        result, t3 = self._run({"VIII_DISABLE_MIRROR": "1"})
+        self.assertIsInstance(result, RuntimeError)
+        t3.assert_not_called()
+
+    def test_disabled_mirror_still_salvages_a_partial(self):
+        result, t3 = self._run({"VIII_DISABLE_MIRROR": "true"}, partial=_bulletin(5))
+        t3.assert_not_called()
+        self.assertEqual(result["stop_reason"], "early_stop")
+        self.assertFalse(result["full_snapshot"])
+
+    def test_disabled_mirror_does_not_affect_nho_tiers(self):
+        result, t3 = self._run({"VIII_DISABLE_MIRROR": "1"},
+                               t2=lambda: (_bulletin(7), "completed"))
+        t3.assert_not_called()
+        self.assertTrue(result["full_snapshot"])
+        self.assertEqual(navarea_8_scraper._header_count(result["text"]), 7)
+
+    def test_mirror_is_used_by_default(self):
+        result, t3 = self._run({"VIII_DISABLE_MIRROR": ""})
+        t3.assert_called_once()
+        self.assertEqual(result["stop_reason"], "completed")
+
+
 class TestViiiSyncForwardsFullSnapshot(unittest.TestCase):
     def test_sync_forwards_partial_flag(self):
         with tempfile.TemporaryDirectory() as tmp:

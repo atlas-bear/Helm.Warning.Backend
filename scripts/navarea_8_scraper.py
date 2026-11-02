@@ -14,6 +14,9 @@ Acquisition tiers (in order, first success wins):
   TIER 3 (fallback): SeaLagom NAVAREA VIII mirror (sealagom.com/navarea/8) —
        anonymous plain-requests fetch of the same in-force bulletin text,
        community-contributed. Used only when both NHO tiers fail.
+       VIII_DISABLE_MIRROR=1 removes this tier, for deployments that may
+       only use the coordinator's own publication: acquisition then
+       succeeds from NHO or fails (or salvages a partial) without it.
 
 Partial-harvest contract (mirrors the IX salvage rules):
   * Tier 1 pagination that stops early (WAF block, dead 'Next', timeout)
@@ -139,6 +142,11 @@ def _fetch_tier2_pdf():
     return text, "completed"
 
 
+def _mirror_disabled() -> bool:
+    """True when VIII_DISABLE_MIRROR removes the Tier 3 mirror."""
+    return os.environ.get("VIII_DISABLE_MIRROR", "").lower() in ("1", "true", "yes")
+
+
 def _fetch_tier3_mirror():
     """SeaLagom mirror: anonymous requests fetch of the in-force text."""
     import requests
@@ -192,9 +200,12 @@ def scrape_viii_warnings(raw_txt="navareas/navarea_8/navarea_8_warnings.txt") ->
     text = None
     stop_reason = None
     errors = []
-    tiers = (("Tier 1 (NHO table)", lambda: _fetch_tier1_table(raw_txt)),
-             ("Tier 2 (NHO PDF)", _fetch_tier2_pdf),
-             ("Tier 3 (SeaLagom mirror)", _fetch_tier3_mirror))
+    tiers = [("Tier 1 (NHO table)", lambda: _fetch_tier1_table(raw_txt)),
+             ("Tier 2 (NHO PDF)", _fetch_tier2_pdf)]
+    if _mirror_disabled():
+        print("[Tier 3] SeaLagom mirror disabled (VIII_DISABLE_MIRROR=1).")
+    else:
+        tiers.append(("Tier 3 (SeaLagom mirror)", _fetch_tier3_mirror))
     for tier_name, fetcher in tiers:
         try:
             candidate, reason = fetcher()
