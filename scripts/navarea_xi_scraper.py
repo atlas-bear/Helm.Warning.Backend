@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
 navarea_xi_scraper.py — Japan Coast Guard NAVAREA XI Scraper
-Automates human-mimicking browser navigation with Bézier mouse movements,
-random 30s–40s dwell times, and "All Display" interaction on kaiho.mlit.go.jp.
+Visits kaiho.mlit.go.jp with human-mimicking browser navigation (Bézier mouse
+movements, random 30s–40s dwell time), then asks the coordinator for every
+warning in force, year by year, and fetches their texts.
+
+Why every year: the portal's "All Display" button lists ONE year's warnings,
+but warnings from earlier years stay in force until cancelled. On 2026-11-03
+the coordinator listed 32 in force, 16 of them issued 2012-2025, and the
+portal's year tabs only reach back to 2017. A harvest of the current year
+alone misses them, and on 1 January it misses every warning still in force
+from the year before, which a full-snapshot sync then reads as withdrawn.
 """
 
 import sys
@@ -11,7 +19,8 @@ import re
 import math
 import random
 import asyncio
-from datetime import datetime
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -43,7 +52,24 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 URL_PORTAL = "https://www1.kaiho.mlit.go.jp/TUHO/keiho/navarea11_en.html"
 URL_DISP = "https://www1.kaiho.mlit.go.jp/TUHO/keiho/cgi/disp_warnings.cgi"
+URL_LIST = "https://www1.kaiho.mlit.go.jp/TUHO/keiho/cgi/warnings.cgi"
 JCG_ENCODING = "cp932"
+JCG_TYPE = "NAVAREA11"
+JCG_LANG = "EG"
+
+# Oldest year asked for. The oldest warning in force on 2026-11-03 was issued in
+# 2012; the harvest prints a warning if FIRST_YEAR itself still lists one.
+# Override with NAVAREA_XI_FIRST_YEAR.
+FIRST_YEAR = 2000
+# Warnings per disp_warnings.cgi request.
+DISP_CHUNK = 40
+
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Referer": URL_PORTAL,
+    "Origin": "https://www1.kaiho.mlit.go.jp",
+    "Content-Type": "application/x-www-form-urlencoded"
+}
 
 
 def _collect_from_text_lines(blocks):
@@ -96,6 +122,94 @@ def _write_output(collected, output_filename):
             f.write(f"--- {warn['header']} ---\n{warn['date_line']}\n{warn['body']}\n\n")
 
 
+def _first_year() -> int:
+    try:
+        return int(os.environ.get("NAVAREA_XI_FIRST_YEAR", FIRST_YEAR))
+    except ValueError:
+        return FIRST_YEAR
+
+
+def _decode(content: bytes) -> str:
+    """The CGI pages declare UTF-8; older pages were Shift JIS."""
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode(JCG_ENCODING, errors="replace")
+
+
+def _parse_member_ids(xml_text: str, year: int) -> list:
+    """Warning ids the coordinator lists as in force for one year.
+
+    warnings.cgi answers <opt><Member><tana>260496</tana>...</Member></opt>,
+    the call the portal makes to fill a year's table. Anything else raises
+    ValueError, so a malformed answer fails the harvest instead of reading as
+    "nothing in force that year".
+    """
+    try:
+        root = ET.fromstring((xml_text or "").strip())
+    except ET.ParseError as e:
+        raise ValueError(f"warnings.cgi {year}: not XML ({e})") from None
+    if root.tag != "opt":
+        raise ValueError(f"warnings.cgi {year}: unexpected root <{root.tag}>")
+    ids = []
+    for member in root.findall("Member"):
+        tana = (member.findtext("tana") or "").strip()
+        if not re.fullmatch(r"\d{6}", tana) or tana[:2] != f"{year % 100:02d}":
+            raise ValueError(f"warnings.cgi {year}: unexpected warning id {tana!r}")
+        ids.append(tana)
+    return ids
+
+
+def _header_for(tana: str) -> str:
+    """'260496' -> 'NAVAREA XI NO.26-0496', the key _collect_from_text_lines gives it."""
+    return f"NAVAREA XI NO.{tana[:2]}-{tana[2:]}"
+
+
+async def _harvest_in_force(post, first_year: int, last_year: int, pause=(0.5, 1.5)):
+    """Every warning the coordinator lists as in force, first_year to last_year.
+
+    post(url, data) -> (status, text) is the transport (browser or direct
+    HTTP). Returns {} when no year lists a warning, and None when any request
+    fails or a listed warning does not come back: a harvest missing warnings
+    would read to a full-snapshot sync as their cancellation.
+    """
+    ids = []
+    for year in range(last_year, first_year - 1, -1):
+        status, text = await post(URL_LIST, {"YEAR": str(year), "TYPE": JCG_TYPE, "LANG": JCG_LANG})
+        if status != 200:
+            print(f"⚠️ warnings.cgi {year}: HTTP {status}; harvest incomplete.")
+            return None
+        try:
+            year_ids = _parse_member_ids(text, year)
+        except ValueError as e:
+            print(f"⚠️ {e}; harvest incomplete.")
+            return None
+        if year == first_year and year_ids:
+            print(f"⚠️ {year} still lists warnings in force; earlier years may too (lower NAVAREA_XI_FIRST_YEAR).")
+        ids.extend(year_ids)
+        if pause:
+            await asyncio.sleep(random.uniform(*pause))
+
+    collected = {}
+    for i in range(0, len(ids), DISP_CHUNK):
+        chunk = ids[i:i + DISP_CHUNK]
+        data = {"TYPE": JCG_TYPE, "TANA": "".join(t + ":" for t in chunk), "LANG": JCG_LANG}
+        status, text = await post(URL_DISP, data)
+        if status != 200:
+            print(f"⚠️ disp_warnings.cgi: HTTP {status}; harvest incomplete.")
+            return None
+        collected.update(_parse_html_warnings(text))
+        if pause:
+            await asyncio.sleep(random.uniform(*pause))
+
+    missing = [t for t in ids if _header_for(t) not in collected]
+    if missing:
+        print(f"⚠️ {len(missing)} listed warning(s) did not come back ({', '.join(missing[:5])}); harvest incomplete.")
+        return None
+    print(f"📋 {len(ids)} warnings in force, {first_year}-{last_year}.")
+    return collected
+
+
 async def _human_mouse_move(page, start_x: float, start_y: float, target_x: float, target_y: float, steps: int = 25):
     """
     Simulates human-like mouse movement using a quadratic Bézier curve
@@ -114,17 +228,20 @@ async def _human_mouse_move(page, start_x: float, start_y: float, target_x: floa
         await asyncio.sleep(random.uniform(0.008, 0.025))
 
 
-async def fetch_via_browser(year=None) -> dict:
+async def fetch_via_browser(year=None, first_year=None):
     """
-    Visits navarea11_en.html, simulates human browsing with curved cursor paths,
-    waits 30s-40s random delay, clicks 'All Display', and extracts warnings from disp_warnings.cgi.
+    Visits navarea11_en.html, simulates human browsing with curved cursor paths
+    and a 30s-40s dwell, then runs the in-force harvest through the browser
+    context (its cookies and headers). Returns the warnings, {} when none are
+    in force, or None when the harvest failed or is incomplete.
     """
     if not HAS_PLAYWRIGHT:
         print("ℹ️ Playwright library not installed in environment; skipping browser automation.")
-        return {}
+        return None
 
-    current_year = year or datetime.now().year
-    print(f"🌐 Launching Chromium browser (target year: {current_year})...")
+    last_year = year or datetime.now(timezone.utc).year
+    first_year = first_year or _first_year()
+    print(f"🌐 Launching Chromium browser (years {first_year}-{last_year})...")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -177,156 +294,88 @@ async def fetch_via_browser(year=None) -> dict:
                 await _human_mouse_move(page, curr_x, curr_y, next_x, next_y, steps=10)
                 curr_x, curr_y = next_x, next_y
 
-            # Locate "All Display" submit button for current year
-            print("🔍 3. Locating 'All Display' button...")
-            btn_selector = f"#ALLMAP_{current_year}"
-            btn = await page.query_selector(btn_selector)
+            async def browser_post(url, data):
+                try:
+                    r = await context.request.post(url, form=data, headers={"Referer": URL_PORTAL}, timeout=30000)
+                    return r.status, _decode(await r.body())
+                except Exception as e:
+                    print(f"⚠️ Browser request error ({url}): {e}")
+                    return 0, ""
 
-            if not btn:
-                # Fallback to general All Display button
-                btn = await page.query_selector("input[value='All Display']")
-
-            if not btn:
-                print("⚠️ Could not find 'All Display' button in DOM.")
-                return {}
-
-            # Scroll button into view if needed
-            await btn.scroll_into_view_if_needed()
-            await asyncio.sleep(0.5)
-
-            box = await btn.bounding_box()
-            if not box:
-                print("⚠️ Button has no bounding box.")
-                return {}
-
-            target_x = box["x"] + box["width"] * random.uniform(0.3, 0.7)
-            target_y = box["y"] + box["height"] * random.uniform(0.3, 0.7)
-
-            print(f"🖱️ 4. Moving mouse along Bézier curve to button ({target_x:.1f}, {target_y:.1f})...")
-            await _human_mouse_move(page, curr_x, curr_y, target_x, target_y, steps=30)
-            # Dwell/hover over button before clicking
-            await asyncio.sleep(random.uniform(0.6, 1.4))
-
-            print("🎯 5. Clicking 'All Display' and awaiting disp_warnings.cgi...")
-            disp_page = None
-            try:
-                # The form uses target="_blank", which triggers a popup tab
-                async with context.expect_page(timeout=25000) as new_page_info:
-                    await page.mouse.click(target_x, target_y)
-                disp_page = await new_page_info.value
-                await disp_page.wait_for_load_state("networkidle", timeout=30000)
-            except Exception as e:
-                print(f"ℹ️ Popup note ({e}), checking current page...")
-                disp_page = page
-
-            final_url = disp_page.url
-            print(f"📄 Reached final endpoint: {final_url}")
-            html_content = await disp_page.content()
-            collected = _parse_html_warnings(html_content)
-            return collected
+            print("🔍 3. Harvesting every year's in-force warnings...")
+            return await _harvest_in_force(browser_post, first_year, last_year)
 
         except Exception as e:
             print(f"⚠️ Browser automation error: {e}")
-            return {}
+            return None
         finally:
             await browser.close()
 
 
-def fetch_direct_disp(year=None):
+def fetch_direct_disp(year=None, first_year=None):
     """
-    HTTP fallback if browser automation or Playwright is not available.
-    Submits structured form payload with dynamic year resolution targeting disp_warnings.cgi.
+    HTTP fallback if browser automation or Playwright is not available: the
+    same in-force harvest over direct requests. Returns the warnings, {} when
+    none are in force, or None when the harvest failed or is incomplete.
     """
-    current_year = year or datetime.now().year
-    print(f"Direct HTTP fetch from official Japan Coast Guard (kaiho.mlit.go.jp) for year {current_year}...")
+    last_year = year or datetime.now(timezone.utc).year
+    first_year = first_year or _first_year()
+    print(f"Direct HTTP fetch from official Japan Coast Guard (kaiho.mlit.go.jp) for years {first_year}-{last_year}...")
     if cffi_requests is None:
-        return {}
+        return None
 
-    form_payload = {
-        "year": str(current_year),
-        "YEAR": str(current_year),
-        "action": "all",
-        "ALLMAP": "All Display",
-        "btn_all": "All Display"
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": URL_PORTAL,
-        "Origin": "https://www1.kaiho.mlit.go.jp",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    response = None
-    try:
+    def call(url, data):
         if HAS_CURL_CFFI:
-            response = cffi_requests.post(URL_DISP, data=form_payload, headers=headers, impersonate="chrome", timeout=30, verify=True)
+            r = cffi_requests.post(url, data=data, headers=HTTP_HEADERS, impersonate="chrome", timeout=30, verify=True)
         else:
-            response = cffi_requests.post(URL_DISP, data=form_payload, headers=headers, timeout=30, verify=True)
-        response.raise_for_status()
-    except Exception:
-        # Fallback to GET with query parameters
+            r = cffi_requests.post(url, data=data, headers=HTTP_HEADERS, timeout=30, verify=True)
+        return r.status_code, _decode(r.content)
+
+    async def direct_post(url, data):
         try:
-            get_params = {
-                "year": str(current_year),
-                "YEAR": str(current_year),
-                "action": "all",
-                "ALLMAP": "All Display"
-            }
-            if HAS_CURL_CFFI:
-                response = cffi_requests.get(URL_DISP, params=get_params, headers={"User-Agent": headers["User-Agent"], "Referer": URL_PORTAL}, impersonate="chrome", timeout=30, verify=True)
-            else:
-                response = cffi_requests.get(URL_DISP, params=get_params, headers={"User-Agent": headers["User-Agent"], "Referer": URL_PORTAL}, timeout=30, verify=True)
-            response.raise_for_status()
+            return await asyncio.to_thread(call, url, data)
         except Exception as e:
-            print(f"⚠️ Direct JCG Kaiho HTTP request error: {e}")
-            return {}
+            print(f"⚠️ Direct JCG Kaiho HTTP request error ({url}): {e}")
+            return 0, ""
 
-    if response is None:
-        return {}
-
-    try:
-        html = response.content.decode(JCG_ENCODING, errors="replace")
-    except Exception:
-        html = response.text
-
-    return _parse_html_warnings(html)
+    return asyncio.run(_harvest_in_force(direct_post, first_year, last_year))
 
 
-def scrape_xi_warnings(output_filename="navareas/navarea_xi/navarea_xi_warnings.txt", year=None):
+def scrape_xi_warnings(output_filename="navareas/navarea_xi/navarea_xi_warnings.txt", year=None, first_year=None):
     print("=" * 60)
     print("⚓ Japan Coast Guard (JCG Kaiho) NAVAREA XI Scraper")
     print("=" * 60)
     if year is None:
-        year = datetime.now().year
-    collected = {}
-    fetch_succeeded = False
+        year = datetime.now(timezone.utc).year
+    if first_year is None:
+        first_year = _first_year()
+    collected = None
 
     # 1. Try humanized browser automation if Playwright is installed
     if HAS_PLAYWRIGHT:
         try:
-            collected = asyncio.run(fetch_via_browser(year=year))
-            fetch_succeeded = True
+            collected = asyncio.run(fetch_via_browser(year=year, first_year=first_year))
             if collected:
                 print(f"✅ Successfully harvested {len(collected)} bulletins via browser automation.")
         except Exception as e:
             print(f"⚠️ Browser harvest attempt failed: {e}")
 
-    # 2. Seamless HTTP fallback if browser was unavailable or yielded zero results
-    if not collected:
+    # 2. HTTP fallback if the browser was unavailable or its harvest incomplete
+    if collected is None:
         try:
-            collected = fetch_direct_disp(year=year)
-            fetch_succeeded = True
+            collected = fetch_direct_disp(year=year, first_year=first_year)
             if collected:
                 print(f"✅ Successfully harvested {len(collected)} bulletins directly via HTTP fallback.")
         except Exception as e:
             print(f"⚠️ Direct JCG Kaiho HTTP fetch failed: {e}")
 
+    if collected is None:
+        # No complete harvest by either path: loud failure, runner aborts,
+        # previous harvest left untouched.
+        print("⛔ JCG Kaiho harvest failed or incomplete on both paths; aborting (harvest untouched).")
+        return None
+
     if not collected:
-        if not fetch_succeeded:
-            # Both acquisition paths failed: loud failure, runner aborts,
-            # previous harvest left untouched.
-            print("⛔ JCG Kaiho unreachable (browser and HTTP fetch both failed); aborting (harvest untouched).")
-            return None
         print("ℹ️ No active warnings in force at JCG Kaiho; writing valid empty harvest.")
         _write_output({}, output_filename)
         return {}
@@ -339,4 +388,3 @@ def scrape_xi_warnings(output_filename="navareas/navarea_xi/navarea_xi_warnings.
 
 if __name__ == "__main__":
     scrape_xi_warnings()
-
