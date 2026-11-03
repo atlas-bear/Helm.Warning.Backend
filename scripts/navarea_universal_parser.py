@@ -125,6 +125,13 @@ RE_UNTIL = re.compile(
 COMPANION_ROMANS = {"I"}
 
 
+# Regions whose warnings carry their date-time group ABOVE the header (see
+# shared.dtg.dtg_line_above). NAVAREA IX was measured against the coordinator's
+# own in-force table on 2026-11-03. Add a region only after the same check: in a
+# feed that closes each warning with its DTG, this would misassign every time.
+DTG_ABOVE_HEADER_REGIONS = {"ix"}
+
+
 def _region_config(region_key):
     """Resolves region-dependent constants (regexes, source_id, numeral).
 
@@ -159,6 +166,7 @@ def _region_config(region_key):
         "cancel_res": region_cancel_patterns(region_key, roman),
         "companion_re": warning_header_re("I"),  # default NAVAREA I header
         "translate_titles": region_key in TITLE_TRANSLATION_REGIONS,
+        "dtg_above_header": region_key in DTG_ABOVE_HEADER_REGIONS,
     }
 
 
@@ -438,10 +446,10 @@ def split_into_warnings(text: str, cfg):
     patterns (default + per-region extras). Returns a list of
     {warning_id, number, year, header_text, raw_text, dtg}.
 
-    A date-time group printed directly above a header (every NAVAREA IX
-    document opens with one) belongs to that header's warning: it is cut
-    from the end of the previous block, appended to its own raw_text and
-    kept as "dtg" (see shared.dtg.dtg_line_above).
+    In a region whose warnings carry their date-time group above the header
+    (cfg["dtg_above_header"]; every NAVAREA IX document opens with one), the
+    DTG is cut from the end of the previous block, appended to its own
+    raw_text and kept as "dtg" (see shared.dtg.dtg_line_above).
     """
     blocks = []
     matches = _collapse_same_warning(_header_matches(text, cfg))
@@ -452,16 +460,17 @@ def split_into_warnings(text: str, cfg):
             continue
         starts.append(m.start())
     starts = sorted(set(starts))
+    above = bool(cfg.get("dtg_above_header"))
     for m in matches:
         start = m.start()
         end = len(text)
         for s in starts:
             if s > start:
-                end = dtg_line_above(text, s)[1]
+                end = dtg_line_above(text, s)[1] if above else s
                 break
         raw_text = text[start:end].strip()
         raw_text = RE_BROADCAST_TAIL.sub("", raw_text).strip()
-        dtg = dtg_line_above(text, start)[0]
+        dtg = dtg_line_above(text, start)[0] if above else None
         if dtg:
             raw_text = f"{raw_text}\n{dtg}"
         number, year = m.group(1), m.group(2)

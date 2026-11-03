@@ -112,18 +112,19 @@ def parse_dtg(text, default_year=None) -> Optional[str]:
 
 
 def dtg_line_above(text, pos):
-    """(dtg line, line start) when the line directly above a header at pos is a DTG.
+    """(dtg line, line start) when the last non-blank line above a header at pos is a DTG.
 
     Some coordinators print each warning's DTG ABOVE its header: every NAVAREA IX
-    document opens with it, and so does each warning in the NAVAREA VIII bulletin.
+    document opens with it (directly above the header since 2025, with a blank line
+    between before then), and so does each warning in the NAVAREA VIII bulletin.
     Splitting such text on headers alone hands each DTG to the previous warning.
     Measured 2026-11-03 against the IX coordinator's own in-force table: 184 of 210
     blocks carried the next warning's DTG and none its own (21 more matched both,
     same-day batches).
 
-    "Directly" means no blank line between the DTG and the header, which is how a
-    leading DTG is printed in both feeds; a DTG that closes the previous warning is
-    followed by a blank line and is left where it is. Returns (None, pos) otherwise.
+    A coordinator that CLOSES each warning with its DTG would read the other way,
+    so callers apply this only to feeds known to print it above the header.
+    Returns (None, pos) otherwise.
     """
     text = text or ""
     i = pos
@@ -131,9 +132,9 @@ def dtg_line_above(text, pos):
         i -= 1
     if i == 0 or text[i - 1] != "\n":
         return None, pos
-    line_end = i - 1
-    line_start = text.rfind("\n", 0, line_end) + 1
-    line = text[line_start:line_end].strip()
+    head = text[:i].rstrip()
+    line_start = head.rfind("\n") + 1
+    line = head[line_start:].strip()
     if line and parse_dtg(line):
         return line, line_start
     return None, pos

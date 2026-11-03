@@ -178,12 +178,27 @@ class TestParsersEmitPublicationTime(unittest.TestCase):
         self.assertNotIn("021500 UTC NOV 2026", warnings["NAVAREA IX 426/26"]["raw_text"])
         self.assertTrue(warnings["NAVAREA IX 425/26"]["raw_text"].endswith("021500 UTC NOV 2026"))
 
-    def test_a_dtg_closing_its_own_warning_stays_with_it(self):
-        # Separated from the next header by a blank line, a DTG closes the warning above.
-        bulletin = IX_093 + "\n\n" + IX_280
-        warnings = {w["warning_id"]: w for w in parse_bulletin_text(bulletin, "ix")["nav_warnings"]}
-        self.assertEqual(warnings["NAVAREA IX 093/26"]["publication_time"], "2026-03-09T15:00:00+00:00")
-        self.assertEqual(warnings["NAVAREA IX 280/26"]["publication_time"], "2026-08-09T15:00:00+00:00")
+    def test_older_ix_documents_put_a_blank_line_under_their_dtg(self):
+        # IX documents before 2025 open with the DTG, a blank line, then the header,
+        # and close with SECURITE. Times from the coordinator's in-force table.
+        harvest = (
+            "111500 UTC MAR 2022\n\n"
+            "NAVAREA IX (.) 102/22 (.) PAKISTAN (.)\nPORT MUHAMMAD BIN QASIM\n\n"
+            "2.  LIGHT BUOY IN 24-34.68N 067-04.07E REPORTED UNLIT\n\nSECURITE\n\n"
+            "071500 UTC MAR 2022\n\n"
+            "NAVAREA IX (.) 095/22 (.) PAKISTAN (.) PORT\nMUHAMMAD BIN QASIM\n\n"
+            "2.  KHUDDI LIGHT HOUSE REPORTED UNLIT\n\nSECURITE\n")
+        warnings = {w["warning_id"]: w for w in parse_bulletin_text(harvest, "ix")["nav_warnings"]}
+        self.assertEqual(warnings["NAVAREA IX 102/22"]["publication_time"], "2022-03-11T15:00:00+00:00")
+        self.assertEqual(warnings["NAVAREA IX 095/22"]["publication_time"], "2022-03-07T15:00:00+00:00")
+
+    def test_a_region_not_known_to_print_it_above_keeps_a_closing_dtg(self):
+        # The move applies only to regions measured to print the DTG above the header.
+        bulletin = ("NAVAREA X 101/26\nCORAL SEA\nBUOY ADRIFT IN 15-00.0S 150-00.0E\n\n031500 UTC MAR 26\n\n"
+                    "NAVAREA X 102/26\nTORRES STRAIT\nLIGHT UNLIT IN 10-30.0S 142-10.0E\n\n041500 UTC MAR 26\n")
+        warnings = {w["warning_id"]: w for w in parse_bulletin_text(bulletin, "x")["nav_warnings"]}
+        self.assertEqual(warnings["NAVAREA X 101/26"]["publication_time"], "2026-03-03T15:00:00+00:00")
+        self.assertEqual(warnings["NAVAREA X 102/26"]["publication_time"], "2026-03-04T15:00:00+00:00")
 
     def test_iii(self):
         warn = self._universal(III_036, "iii")
