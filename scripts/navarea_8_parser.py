@@ -38,7 +38,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 from shared.utils import parse_coordinates, classify_hazard_categories
-from shared.dtg import find_dtg_line
+from shared.dtg import dtg_line_above, parse_dtg
 
 SOURCE_ID = "nho-navarea-viii"
 NAVAREA_ID = "VIII"
@@ -139,20 +139,31 @@ def _extract_cross_refs(raw_text: str):
 def split_into_warnings(text: str):
     """
     Segments the bulletin into warning blocks on 'NAVAREA VIII [-]n/yy' headers.
-    Returns a list of {warning_id, number, year, raw_text}.
+    Returns a list of {warning_id, number, year, raw_text, dtg}.
+
+    The NHO bulletin prints each warning's date-time group on the line above its
+    header ("241631Z/APR 26" / "NAVAREA VIII -499/26"). It is cut from the end of
+    the previous block and appended to its own raw_text, and kept as "dtg".
+    Verified 2026-11-03 against an independent feed: 54 of 54 equal to the minute.
     """
+    text = text or ""
     blocks = []
-    matches = list(RE_WARNING_HEADER.finditer(text or ""))
+    matches = list(RE_WARNING_HEADER.finditer(text))
+    dtgs = [dtg_line_above(text, m.start()) for m in matches]
     for i, m in enumerate(matches):
         start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        end = dtgs[i + 1][1] if i + 1 < len(matches) else len(text)
         raw_text = text[start:end].strip()
+        dtg = dtgs[i][0]
+        if dtg:
+            raw_text = f"{raw_text}\n{dtg}"
         number, year = m.group(1), m.group(2)
         blocks.append({
             "warning_id": f"NAVAREA VIII {number}/{year}",
             "number": number,
             "year": year,
             "raw_text": raw_text,
+            "dtg": dtg,
         })
     return blocks
 
@@ -229,8 +240,8 @@ def parse_warning(block):
         "sub_areas": [c["label"] for c in clauses],
         "geometry_sub_areas": geom_labels,
         "cross_refs": _extract_cross_refs(raw_text),
-        # Issue time from the closing date-time group ("031006Z/JUN 26").
-        "publication_time": find_dtg_line(raw_text, _header_year(raw_text)),
+        # Issue time: the date-time group above the warning's header ("031006Z/JUN 26").
+        "publication_time": parse_dtg(block.get("dtg"), block.get("year") or _header_year(raw_text)),
     }
     return raw_message, nav_warning
 

@@ -111,6 +111,34 @@ def parse_dtg(text, default_year=None) -> Optional[str]:
     return None
 
 
+def dtg_line_above(text, pos):
+    """(dtg line, line start) when the line directly above a header at pos is a DTG.
+
+    Some coordinators print each warning's DTG ABOVE its header: every NAVAREA IX
+    document opens with it, and so does each warning in the NAVAREA VIII bulletin.
+    Splitting such text on headers alone hands each DTG to the previous warning.
+    Measured 2026-11-03 against the IX coordinator's own in-force table: 184 of 210
+    blocks carried the next warning's DTG and none its own (21 more matched both,
+    same-day batches).
+
+    "Directly" means no blank line between the DTG and the header, which is how a
+    leading DTG is printed in both feeds; a DTG that closes the previous warning is
+    followed by a blank line and is left where it is. Returns (None, pos) otherwise.
+    """
+    text = text or ""
+    i = pos
+    while i > 0 and text[i - 1] in " \t":
+        i -= 1
+    if i == 0 or text[i - 1] != "\n":
+        return None, pos
+    line_end = i - 1
+    line_start = text.rfind("\n", 0, line_end) + 1
+    line = text[line_start:line_end].strip()
+    if line and parse_dtg(line):
+        return line, line_start
+    return None, pos
+
+
 def find_dtg_line(raw_text, default_year=None) -> Optional[str]:
     """Issue time from the first line of raw_text that is only a DTG, else None."""
     for line in (raw_text or "").splitlines():

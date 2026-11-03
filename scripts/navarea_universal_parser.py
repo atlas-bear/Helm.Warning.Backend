@@ -60,7 +60,7 @@ from shared.navarea_universal_text import (
     AUSCOAST_AREAS, RE_AUSCOAST_HEADER, RE_AUSCOAST_CANCEL, RE_NEVER_MATCHES,
 )
 from shared import translation
-from shared.dtg import find_dtg_line
+from shared.dtg import dtg_line_above, find_dtg_line, parse_dtg
 
 # Numbered item line: '1. HAZARDOUS ...' / 'A. ...'-adjacent numbering.
 # Line-anchored: a sentence-ending date like '... UTC oct 26.\nTo report'
@@ -436,7 +436,12 @@ def split_into_warnings(text: str, cfg):
     """
     Segments the bulletin into warning blocks on the region's header
     patterns (default + per-region extras). Returns a list of
-    {warning_id, number, year, header_text, raw_text}.
+    {warning_id, number, year, header_text, raw_text, dtg}.
+
+    A date-time group printed directly above a header (every NAVAREA IX
+    document opens with one) belongs to that header's warning: it is cut
+    from the end of the previous block, appended to its own raw_text and
+    kept as "dtg" (see shared.dtg.dtg_line_above).
     """
     blocks = []
     matches = _collapse_same_warning(_header_matches(text, cfg))
@@ -452,16 +457,20 @@ def split_into_warnings(text: str, cfg):
         end = len(text)
         for s in starts:
             if s > start:
-                end = s
+                end = dtg_line_above(text, s)[1]
                 break
         raw_text = text[start:end].strip()
         raw_text = RE_BROADCAST_TAIL.sub("", raw_text).strip()
+        dtg = dtg_line_above(text, start)[0]
+        if dtg:
+            raw_text = f"{raw_text}\n{dtg}"
         number, year = m.group(1), m.group(2)
         blocks.append({
             "number": number,
             "year": year,  # may be None (NAVAREA XV) — resolved by caller
             "header_text": m.group(0),
             "raw_text": raw_text,
+            "dtg": dtg,
         })
     return blocks
 
@@ -596,10 +605,12 @@ def parse_warning(block, cfg):
     # upsert RPC) already consumed these keys — the parser just never
     # produced them. Fail-closed: None means "no date evidence".
     valid_from, valid_to = _extract_validity_dates(raw_text, year)
-    # Issue time: the warning's own date-time group line (IX ends with
-    # "031500 UTC MAR 2026", III opens with "25 February 2022 00:00 UTC").
-    # build_master_payload falls back to it for valid_from.
-    publication_time = find_dtg_line(raw_text, year)
+    # Issue time: the warning's own date-time group. NAVAREA IX prints it
+    # above the header (moved here by split_into_warnings); NAVAREA III
+    # prints "25 February 2022 00:00 UTC" under it. build_master_payload
+    # falls back to it for valid_from.
+    publication_time = (parse_dtg(block.get("dtg"), year) if block.get("dtg")
+                        else find_dtg_line(raw_text, year))
 
     nav_warning = {
         "warning_id": warning_id,
