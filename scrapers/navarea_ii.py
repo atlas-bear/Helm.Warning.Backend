@@ -592,6 +592,9 @@ def run_navarea_ii_pipeline(
                         "master": master,
                         "geometries": geoms,
                         "cross_refs": [],
+                        # NAVAREA II has no validity windows: valid_from IS
+                        # the S-124 publication time.
+                        "publication_time": master.get("valid_from"),
                     })
                     summary["synced"] += 1
                     print(f"  📝 [SINK] Processed {master['canonical_id']} (Triage: {master['triage_tier']}, Geoms: {len(geoms)})")

@@ -23,10 +23,14 @@ Record contract (schema "helm.sync_run.v1", one line per run):
                   stopped early): absence from it is NOT withdrawal
                   evidence. Same meaning as run_differential_sync's
                   argument.
-  warnings        list of {warning_id, master, geometries, cross_refs};
-                  master and geometries are exactly what the Supabase
-                  path would write (build_master_payload /
-                  build_geometry_payloads).
+  warnings        list of {warning_id, master, geometries, cross_refs,
+                  publication_time}; master and geometries are exactly
+                  what the Supabase path would write (build_master_payload
+                  / build_geometry_payloads). publication_time is the
+                  warning's issue time (ISO-8601, or null when the parser
+                  found none). It is kept apart from master.valid_from,
+                  which is the start of a validity window when the
+                  warning states one.
   cancel_targets  {target canonical_id: carrier canonical_id} resolved
                   from CANCEL cross-references by the same pure mapping
                   the Supabase path uses (_cancel_ref_target_ids).

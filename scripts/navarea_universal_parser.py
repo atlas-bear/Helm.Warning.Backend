@@ -60,6 +60,7 @@ from shared.navarea_universal_text import (
     AUSCOAST_AREAS, RE_AUSCOAST_HEADER, RE_AUSCOAST_CANCEL, RE_NEVER_MATCHES,
 )
 from shared import translation
+from shared.dtg import find_dtg_line
 
 # Numbered item line: '1. HAZARDOUS ...' / 'A. ...'-adjacent numbering.
 # Line-anchored: a sentence-ending date like '... UTC oct 26.\nTo report'
@@ -595,6 +596,10 @@ def parse_warning(block, cfg):
     # upsert RPC) already consumed these keys — the parser just never
     # produced them. Fail-closed: None means "no date evidence".
     valid_from, valid_to = _extract_validity_dates(raw_text, year)
+    # Issue time: the warning's own date-time group line (IX ends with
+    # "031500 UTC MAR 2026", III opens with "25 February 2022 00:00 UTC").
+    # build_master_payload falls back to it for valid_from.
+    publication_time = find_dtg_line(raw_text, year)
 
     nav_warning = {
         "warning_id": warning_id,
@@ -618,6 +623,7 @@ def parse_warning(block, cfg):
         "data_quality": data_quality or "EXPLICIT",
         "valid_from": valid_from,
         "valid_to": valid_to,
+        "publication_time": publication_time,
     }
     return raw_message, nav_warning
 

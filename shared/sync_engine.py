@@ -376,6 +376,7 @@ def _emit_to_sink(
             "master": master,
             "geometries": geoms,
             "cross_refs": raw_warn.get("cross_refs") or [],
+            "publication_time": parse_safe_iso_timestamp(raw_warn.get("publication_time")),
         })
     scraped_ids = {e["master"]["canonical_id"] for e in entries}
     # Carriers are keyed by canonical_id so a target maps to a full id

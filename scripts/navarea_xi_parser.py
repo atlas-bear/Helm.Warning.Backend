@@ -20,6 +20,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 
+from shared.dtg import parse_dtg
 from shared.utils import (
     convert_to_decimal, parse_block_geometries, classify_hazard,
     classify_hazard_categories,
@@ -92,6 +93,9 @@ def parse_warning(raw_block, reference_header):
         "navarea": NAVAREA_ID,
         "title": title or header_clean,
         "issued_text": issued_text,
+        # "2026/11/02 12 UTC" is not a format parse_safe_iso_timestamp
+        # reads, so without this build_master_payload had no valid_from.
+        "publication_time": parse_dtg(issued_text),
         "coordinates": ", ".join(coords_text) if coords_text else None,
         "latitude": lat,
         "longitude": lon,

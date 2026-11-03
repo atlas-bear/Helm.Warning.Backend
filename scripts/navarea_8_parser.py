@@ -38,6 +38,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 from shared.utils import parse_coordinates, classify_hazard_categories
+from shared.dtg import find_dtg_line
 
 SOURCE_ID = "nho-navarea-viii"
 NAVAREA_ID = "VIII"
@@ -115,6 +116,12 @@ def _extract_title(body: str) -> str:
     # Trim trailing DTG tokens the mirror prepends to the next warning.
     title = re.sub(r"\b\d{6}Z?\s*/?\s*[A-Z]{3}\s+\d{2}\s*$", "", title).strip()
     return title[:255] or "NAVAREA VIII Warning"
+
+
+def _header_year(raw_text: str):
+    """The warning's own year ("26" in NAVAREA VIII -499/26), or None."""
+    m = RE_WARNING_HEADER.search(raw_text or "")
+    return m.group(2) if m else None
 
 
 def _extract_cross_refs(raw_text: str):
@@ -222,6 +229,8 @@ def parse_warning(block):
         "sub_areas": [c["label"] for c in clauses],
         "geometry_sub_areas": geom_labels,
         "cross_refs": _extract_cross_refs(raw_text),
+        # Issue time from the closing date-time group ("031006Z/JUN 26").
+        "publication_time": find_dtg_line(raw_text, _header_year(raw_text)),
     }
     return raw_message, nav_warning
 

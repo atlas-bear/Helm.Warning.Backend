@@ -256,6 +256,17 @@ class TestNavareaIISink(unittest.TestCase):
         self.assertTrue(rec["full_snapshot"])
         self.assertEqual(sorted(w["master"]["canonical_id"] for w in rec["warnings"]),
                          ["NAVAREA II 777/26", "NAVAREA II 778/26"])
+        for w in rec["warnings"]:
+            self.assertIn("publication_time", w)
+
+    def test_entry_carries_the_s124_publication_time(self):
+        # NAVAREA II's issue time is its S-124 publication time, which is also
+        # its valid_from (II states no validity windows).
+        gml = _GML.replace("</S124>", "<publicationTime>2026-11-02T13:49:33Z</publicationTime></S124>")
+        run_navarea_ii_pipeline(mock_payload=_exchange_set(gml.format(n=779)))
+        w = _read_records(self.path)[0]["warnings"][0]
+        self.assertTrue(w["publication_time"].startswith("2026-11-02T13:49:33"))
+        self.assertEqual(w["publication_time"], w["master"]["valid_from"])
 
     def test_undecodable_dataset_makes_the_run_partial(self):
         run_navarea_ii_pipeline(mock_payload=_exchange_set(_GML.format(n=777), broken=1))
